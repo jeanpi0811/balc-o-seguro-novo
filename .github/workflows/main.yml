@@ -36,12 +36,15 @@ jobs:
           rm -rf projeto-extraido
           mkdir -p projeto-extraido
 
-          ZIP_PATH="<LaTex>(find . -maxdepth 2 -name "*.zip" | head -n 1 || true)"            if [ -n "</LaTex>ZIP_PATH" ]; then
-            echo "ZIP encontrado: <LaTex>ZIP_PATH"             unzip -q "</LaTex>ZIP_PATH" -d projeto-extraido
+          ZIP_PATH="$(find . -maxdepth 2 -type f -name '*.zip' -print -quit || true)"
+
+          if [[ -z "${ZIP_PATH:-}" ]]; then
+            echo "Nenhum ZIP encontrado. Vou procurar o package.json direto no repositorio."
+          else
+            echo "ZIP encontrado: ${ZIP_PATH}"
+            unzip -q "${ZIP_PATH}" -d projeto-extraido
             echo "Conteudo extraido:"
             find projeto-extraido -maxdepth 4 -type f | sort | head -n 150
-          else
-            echo "Nenhum ZIP encontrado. Vou procurar o package.json direto no repositorio."
           fi
 
       - name: Detectar pasta do projeto
@@ -51,14 +54,22 @@ jobs:
           if [ -f "package.json" ]; then
             PROJECT_DIR="."
           else
-            PROJECT_DIR="<LaTex>(find . -maxdepth 7 -name package.json \               -not -path "*/node_modules/*" \               -printf '%h\n' | head -n 1 || true)"           fi            if [ -z "</LaTex>PROJECT_DIR" ]; then
+            PROJECT_DIR="$(find . -maxdepth 7 -name package.json -not -path "*/node_modules/*" -printf '%h\n' | head -n 1 || true)"
+          fi
+
+          if [ -z "$PROJECT_DIR" ]; then
             echo "ERRO: package.json nao encontrado."
             echo "Estrutura encontrada:"
             find . -maxdepth 7 -type f | sort
             exit 1
           fi
 
-          echo "Projeto detectado em: <LaTex>PROJECT_DIR"           echo "PROJECT_DIR=</LaTex>PROJECT_DIR" >> "<LaTex>GITHUB_ENV"            APP_VERSION="</LaTex>(node -p "require('./<LaTex>{PROJECT_DIR}/app.json').expo.version")"           echo "APP_VERSION=</LaTex>APP_VERSION" >> "<LaTex>GITHUB_ENV"           echo "Versao do app:</LaTex>APP_VERSION"
+          echo "Projeto detectado em: $PROJECT_DIR"
+          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
+
+          APP_VERSION="$(node -p "require('./${PROJECT_DIR}/app.json').expo.version")"
+          echo "APP_VERSION=$APP_VERSION" >> "$GITHUB_ENV"
+          echo "Versao do app: $APP_VERSION"
 
           echo "Conteudo da pasta do projeto:"
           ls -la "$PROJECT_DIR"
@@ -81,7 +92,11 @@ jobs:
           npm -v
           java -version
           echo "PROJECT_DIR=$PROJECT_DIR"
-          echo "APP_VERSION=<LaTex>APP_VERSION"        - name: Instalar dependencias         run: |           set -e           cd "</LaTex>PROJECT_DIR"
+
+      - name: Instalar dependencias
+        run: |
+          set -e
+          cd "$PROJECT_DIR"
 
           rm -rf node_modules android ios
           rm -f package-lock.json npm-shrinkwrap.json
@@ -90,7 +105,7 @@ jobs:
           npm cache clean --force || true
           npm install --legacy-peer-deps --no-audit --fund=false
 
-      - name: Validar base e TypeScript
+      - name: Validar base e TypeScript sem travar build
         run: |
           cd "$PROJECT_DIR"
 
@@ -109,11 +124,7 @@ jobs:
           set -e
           cd "$PROJECT_DIR"
 
-          npx expo prebuild \
-            -p android \
-            --clean \
-            --non-interactive \
-            --no-install
+          npx expo prebuild -p android --clean --non-interactive --no-install
 
           if [ -f "scripts/patch_android_manifest.py" ]; then
             python3 scripts/patch_android_manifest.py || true
@@ -121,36 +132,47 @@ jobs:
 
       - name: Preparar assinatura release
         env:
-          ANDROID_KEYSTORE_BASE64: <LaTex>{{ secrets.ANDROID_KEYSTORE_BASE64 }}           ANDROID_KEYSTORE_PASSWORD:</LaTex>{{ secrets.ANDROID_KEYSTORE_PASSWORD }}
-          ANDROID_KEY_ALIAS: <LaTex>{{ secrets.ANDROID_KEY_ALIAS }}           ANDROID_KEY_PASSWORD:</LaTex>{{ secrets.ANDROID_KEY_PASSWORD }}
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
         run: |
           set -e
-          cd "<LaTex>PROJECT_DIR"            mkdir -p signing            if [ -n "</LaTex>{ANDROID_KEYSTORE_BASE64:-}" ] \
-            && [ -n "<LaTex>{ANDROID_KEYSTORE_PASSWORD:-}" ] \             && [ -n "</LaTex>{ANDROID_KEY_ALIAS:-}" ] \
-            && [ -n "<LaTex>{ANDROID_KEY_PASSWORD:-}" ]; then              echo "Usando keystore fixa dos GitHub Secrets."              echo "</LaTex>ANDROID_KEYSTORE_BASE64" | base64 -d \
-              > signing/balcao-seguro-upload-key.keystore
+          cd "$PROJECT_DIR"
 
-            STORE_PASSWORD="<LaTex>ANDROID_KEYSTORE_PASSWORD"             KEY_ALIAS="</LaTex>ANDROID_KEY_ALIAS"
-            KEY_PASSWORD="<LaTex>ANDROID_KEY_PASSWORD"            else             echo "Secrets nao configurados."             echo "Criando assinatura temporaria para APK instalavel."              STORE_PASSWORD="</LaTex>KEYSTORE_PASSWORD_FALLBACK"
+          mkdir -p signing
+
+          if [ -n "${ANDROID_KEYSTORE_BASE64:-}" ] && [ -n "${ANDROID_KEYSTORE_PASSWORD:-}" ] && [ -n "${ANDROID_KEY_ALIAS:-}" ] && [ -n "${ANDROID_KEY_PASSWORD:-}" ]; then
+            echo "Usando keystore fixa dos GitHub Secrets."
+            echo "$ANDROID_KEYSTORE_BASE64" | base64 -d > signing/balcao-seguro-upload-key.keystore
+            STORE_PASSWORD="$ANDROID_KEYSTORE_PASSWORD"
+            KEY_ALIAS="$ANDROID_KEY_ALIAS"
+            KEY_PASSWORD="$ANDROID_KEY_PASSWORD"
+          else
+            echo "Secrets nao configurados. Criando assinatura temporaria para APK instalavel."
+            STORE_PASSWORD="$KEYSTORE_PASSWORD_FALLBACK"
             KEY_ALIAS="balcao_seguro_upload"
-            KEY_PASSWORD="<LaTex>KEYSTORE_PASSWORD_FALLBACK"              keytool -genkeypair \               -v \               -storetype PKCS12 \               -keystore signing/balcao-seguro-upload-key.keystore \               -alias "</LaTex>KEY_ALIAS" \
+            KEY_PASSWORD="$KEYSTORE_PASSWORD_FALLBACK"
+
+            keytool -genkeypair \
+              -v \
+              -storetype PKCS12 \
+              -keystore signing/balcao-seguro-upload-key.keystore \
+              -alias "$KEY_ALIAS" \
               -keyalg RSA \
               -keysize 2048 \
               -validity 10000 \
-              -storepass "<LaTex>STORE_PASSWORD" \               -keypass "</LaTex>KEY_PASSWORD" \
+              -storepass "$STORE_PASSWORD" \
+              -keypass "$KEY_PASSWORD" \
               -dname "CN=Jean Pierre Andres, OU=CRF-RS 15974, O=Balcao Seguro, L=Passo Fundo, ST=RS, C=BR"
           fi
 
-          printf \
-            "storeFile=../signing/balcao-seguro-upload-key.keystore\nstorePassword=%s\nkeyAlias=%s\nkeyPassword=%s\n" \
-            "<LaTex>STORE_PASSWORD" \             "</LaTex>KEY_ALIAS" \
-            "$KEY_PASSWORD" \
-            > android/balcao-seguro-keystore.properties
+          printf "storeFile=../signing/balcao-seguro-upload-key.keystore\nstorePassword=%s\nkeyAlias=%s\nkeyPassword=%s\n" "$STORE_PASSWORD" "$KEY_ALIAS" "$KEY_PASSWORD" > android/balcao-seguro-keystore.properties
 
           if [ -f "scripts/patch_android_signing.py" ]; then
             python3 scripts/patch_android_signing.py
           else
-            echo "ERRO: scripts/patch_android_signing.py nao encontrado."
+            echo "ERRO: scripts/patch_android_signing.py nao encontrado. Use o ZIP correto do projeto v1.2.6."
             exit 1
           fi
 
@@ -160,43 +182,38 @@ jobs:
           cd "$PROJECT_DIR/android"
 
           chmod +x ./gradlew
-          ./gradlew clean assembleRelease bundleRelease \
-            --stacktrace \
-            --no-daemon
+          ./gradlew clean assembleRelease bundleRelease --stacktrace --no-daemon
 
       - name: Validar que nao depende de servidor Metro
         run: |
-          cd "<LaTex>PROJECT_DIR"            APK_PATH="</LaTex>(
-            find android/app/build/outputs/apk/release \
-              -name "*.apk" | head -n 1
-          )"
+          cd "$PROJECT_DIR"
 
-          echo "APK encontrado: <LaTex>APK_PATH"            if [ -f "scripts/validar_apk_sem_servidor.py" ]; then             python3 scripts/validar_apk_sem_servidor.py "</LaTex>APK_PATH" || true
+          APK_PATH="$(find android/app/build/outputs/apk/release -name "*.apk" | head -n 1)"
+          echo "APK encontrado: $APK_PATH"
+
+          if [ -f "scripts/validar_apk_sem_servidor.py" ]; then
+            python3 scripts/validar_apk_sem_servidor.py "$APK_PATH" || true
           fi
 
       - name: Separar arquivos finais
         run: |
           set -e
 
-          mkdir -p apk-final
-          mkdir -p aab-final
+          mkdir -p apk-final aab-final
 
-          APK_PATH="<LaTex>(             find "</LaTex>PROJECT_DIR/android/app/build/outputs/apk/release" \
-              -name "*.apk" | head -n 1
-          )"
+          APK_PATH="$(find "$PROJECT_DIR/android/app/build/outputs/apk/release" -name "*.apk" | head -n 1)"
+          AAB_PATH="$(find "$PROJECT_DIR/android/app/build/outputs/bundle/release" -name "*.aab" | head -n 1 || true)"
 
-          AAB_PATH="<LaTex>(             find "</LaTex>PROJECT_DIR/android/app/build/outputs/bundle/release" \
-              -name "*.aab" | head -n 1 || true
-          )"
-
-          if [ -z "<LaTex>APK_PATH" ]; then             echo "ERRO: APK release nao encontrado."             find "</LaTex>PROJECT_DIR/android/app/build/outputs" -type f || true
+          if [ -z "$APK_PATH" ]; then
+            echo "ERRO: APK release nao encontrado."
+            find "$PROJECT_DIR/android/app/build/outputs" -type f || true
             exit 1
           fi
 
-          cp "<LaTex>APK_PATH" \             "apk-final/Balcao-Seguro-v</LaTex>{APP_VERSION}-release-sem-servidor.apk"
+          cp "$APK_PATH" "apk-final/Balcao-Seguro-v${APP_VERSION}-release-sem-servidor.apk"
 
-          if [ -n "<LaTex>AAB_PATH" ]; then             cp "</LaTex>AAB_PATH" \
-              "aab-final/Balcao-Seguro-v${APP_VERSION}-playstore.aab"
+          if [ -n "$AAB_PATH" ]; then
+            cp "$AAB_PATH" "aab-final/Balcao-Seguro-v${APP_VERSION}-playstore.aab"
           fi
 
           echo "Arquivos finais:"
