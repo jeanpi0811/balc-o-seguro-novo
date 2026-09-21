@@ -1,0 +1,228 @@
+name: Gerar APK Release Sem Servidor
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - master
+
+permissions:
+  contents: read
+
+env:
+  CI: true
+  EXPO_NO_TELEMETRY: 1
+  NPM_CONFIG_LEGACY_PEER_DEPS: true
+  NPM_CONFIG_REGISTRY: https://registry.npmjs.org/
+  KEYSTORE_PASSWORD_FALLBACK: BalcaoSeguroCI2026
+
+jobs:
+  build-android-release:
+    name: Compilar APK release offline
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Baixar projeto
+        uses: actions/checkout@v4
+
+      - name: Extrair projeto se estiver em ZIP
+        run: |
+          set -e
+
+          echo "Arquivos na raiz do repositorio:"
+          ls -la
+
+          rm -rf projeto-extraido
+          mkdir -p projeto-extraido
+
+          ZIP_PATH="<LaTex>(find . -maxdepth 2 -name "*.zip" | head -n 1 || true)"            if [ -n "</LaTex>ZIP_PATH" ]; then
+            echo "ZIP encontrado: <LaTex>ZIP_PATH"             unzip -q "</LaTex>ZIP_PATH" -d projeto-extraido
+            echo "Conteudo extraido:"
+            find projeto-extraido -maxdepth 4 -type f | sort | head -n 150
+          else
+            echo "Nenhum ZIP encontrado. Vou procurar o package.json direto no repositorio."
+          fi
+
+      - name: Detectar pasta do projeto
+        run: |
+          set -e
+
+          if [ -f "package.json" ]; then
+            PROJECT_DIR="."
+          else
+            PROJECT_DIR="<LaTex>(find . -maxdepth 7 -name package.json \               -not -path "*/node_modules/*" \               -printf '%h\n' | head -n 1 || true)"           fi            if [ -z "</LaTex>PROJECT_DIR" ]; then
+            echo "ERRO: package.json nao encontrado."
+            echo "Estrutura encontrada:"
+            find . -maxdepth 7 -type f | sort
+            exit 1
+          fi
+
+          echo "Projeto detectado em: <LaTex>PROJECT_DIR"           echo "PROJECT_DIR=</LaTex>PROJECT_DIR" >> "<LaTex>GITHUB_ENV"            APP_VERSION="</LaTex>(node -p "require('./<LaTex>{PROJECT_DIR}/app.json').expo.version")"           echo "APP_VERSION=</LaTex>APP_VERSION" >> "<LaTex>GITHUB_ENV"           echo "Versao do app:</LaTex>APP_VERSION"
+
+          echo "Conteudo da pasta do projeto:"
+          ls -la "$PROJECT_DIR"
+
+      - name: Configurar Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          package-manager-cache: false
+
+      - name: Configurar Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Mostrar ambiente
+        run: |
+          node -v
+          npm -v
+          java -version
+          echo "PROJECT_DIR=$PROJECT_DIR"
+          echo "APP_VERSION=<LaTex>APP_VERSION"        - name: Instalar dependencias         run: |           set -e           cd "</LaTex>PROJECT_DIR"
+
+          rm -rf node_modules android ios
+          rm -f package-lock.json npm-shrinkwrap.json
+
+          npm config set registry https://registry.npmjs.org/
+          npm cache clean --force || true
+          npm install --legacy-peer-deps --no-audit --fund=false
+
+      - name: Validar base e TypeScript
+        run: |
+          cd "$PROJECT_DIR"
+
+          npx tsc --noEmit
+
+          if [ -f "scripts/validar_base_enriquecida.py" ]; then
+            python3 scripts/validar_base_enriquecida.py || true
+          fi
+
+          if [ -f "scripts/validar_base_medicamentos.py" ]; then
+            python3 scripts/validar_base_medicamentos.py || true
+          fi
+
+      - name: Gerar Android nativo
+        run: |
+          set -e
+          cd "$PROJECT_DIR"
+
+          npx expo prebuild \
+            -p android \
+            --clean \
+            --non-interactive \
+            --no-install
+
+          if [ -f "scripts/patch_android_manifest.py" ]; then
+            python3 scripts/patch_android_manifest.py || true
+          fi
+
+      - name: Preparar assinatura release
+        env:
+          ANDROID_KEYSTORE_BASE64: <LaTex>{{ secrets.ANDROID_KEYSTORE_BASE64 }}           ANDROID_KEYSTORE_PASSWORD:</LaTex>{{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: <LaTex>{{ secrets.ANDROID_KEY_ALIAS }}           ANDROID_KEY_PASSWORD:</LaTex>{{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          set -e
+          cd "<LaTex>PROJECT_DIR"            mkdir -p signing            if [ -n "</LaTex>{ANDROID_KEYSTORE_BASE64:-}" ] \
+            && [ -n "<LaTex>{ANDROID_KEYSTORE_PASSWORD:-}" ] \             && [ -n "</LaTex>{ANDROID_KEY_ALIAS:-}" ] \
+            && [ -n "<LaTex>{ANDROID_KEY_PASSWORD:-}" ]; then              echo "Usando keystore fixa dos GitHub Secrets."              echo "</LaTex>ANDROID_KEYSTORE_BASE64" | base64 -d \
+              > signing/balcao-seguro-upload-key.keystore
+
+            STORE_PASSWORD="<LaTex>ANDROID_KEYSTORE_PASSWORD"             KEY_ALIAS="</LaTex>ANDROID_KEY_ALIAS"
+            KEY_PASSWORD="<LaTex>ANDROID_KEY_PASSWORD"            else             echo "Secrets nao configurados."             echo "Criando assinatura temporaria para APK instalavel."              STORE_PASSWORD="</LaTex>KEYSTORE_PASSWORD_FALLBACK"
+            KEY_ALIAS="balcao_seguro_upload"
+            KEY_PASSWORD="<LaTex>KEYSTORE_PASSWORD_FALLBACK"              keytool -genkeypair \               -v \               -storetype PKCS12 \               -keystore signing/balcao-seguro-upload-key.keystore \               -alias "</LaTex>KEY_ALIAS" \
+              -keyalg RSA \
+              -keysize 2048 \
+              -validity 10000 \
+              -storepass "<LaTex>STORE_PASSWORD" \               -keypass "</LaTex>KEY_PASSWORD" \
+              -dname "CN=Jean Pierre Andres, OU=CRF-RS 15974, O=Balcao Seguro, L=Passo Fundo, ST=RS, C=BR"
+          fi
+
+          printf \
+            "storeFile=../signing/balcao-seguro-upload-key.keystore\nstorePassword=%s\nkeyAlias=%s\nkeyPassword=%s\n" \
+            "<LaTex>STORE_PASSWORD" \             "</LaTex>KEY_ALIAS" \
+            "$KEY_PASSWORD" \
+            > android/balcao-seguro-keystore.properties
+
+          if [ -f "scripts/patch_android_signing.py" ]; then
+            python3 scripts/patch_android_signing.py
+          else
+            echo "ERRO: scripts/patch_android_signing.py nao encontrado."
+            exit 1
+          fi
+
+      - name: Compilar APK e AAB release com JS embutido
+        run: |
+          set -e
+          cd "$PROJECT_DIR/android"
+
+          chmod +x ./gradlew
+          ./gradlew clean assembleRelease bundleRelease \
+            --stacktrace \
+            --no-daemon
+
+      - name: Validar que nao depende de servidor Metro
+        run: |
+          cd "<LaTex>PROJECT_DIR"            APK_PATH="</LaTex>(
+            find android/app/build/outputs/apk/release \
+              -name "*.apk" | head -n 1
+          )"
+
+          echo "APK encontrado: <LaTex>APK_PATH"            if [ -f "scripts/validar_apk_sem_servidor.py" ]; then             python3 scripts/validar_apk_sem_servidor.py "</LaTex>APK_PATH" || true
+          fi
+
+      - name: Separar arquivos finais
+        run: |
+          set -e
+
+          mkdir -p apk-final
+          mkdir -p aab-final
+
+          APK_PATH="<LaTex>(             find "</LaTex>PROJECT_DIR/android/app/build/outputs/apk/release" \
+              -name "*.apk" | head -n 1
+          )"
+
+          AAB_PATH="<LaTex>(             find "</LaTex>PROJECT_DIR/android/app/build/outputs/bundle/release" \
+              -name "*.aab" | head -n 1 || true
+          )"
+
+          if [ -z "<LaTex>APK_PATH" ]; then             echo "ERRO: APK release nao encontrado."             find "</LaTex>PROJECT_DIR/android/app/build/outputs" -type f || true
+            exit 1
+          fi
+
+          cp "<LaTex>APK_PATH" \             "apk-final/Balcao-Seguro-v</LaTex>{APP_VERSION}-release-sem-servidor.apk"
+
+          if [ -n "<LaTex>AAB_PATH" ]; then             cp "</LaTex>AAB_PATH" \
+              "aab-final/Balcao-Seguro-v${APP_VERSION}-playstore.aab"
+          fi
+
+          echo "Arquivos finais:"
+          ls -lh apk-final || true
+          ls -lh aab-final || true
+
+      - name: Enviar APK para download
+        uses: actions/upload-artifact@v4
+        with:
+          name: Balcao-Seguro-APK-Release-Sem-Servidor
+          path: apk-final/*.apk
+          if-no-files-found: error
+
+      - name: Enviar AAB para Play Store
+        uses: actions/upload-artifact@v4
+        with:
+          name: Balcao-Seguro-AAB-Play-Store
+          path: aab-final/*.aab
+          if-no-files-found: warn
+
+      - name: Enviar logs se falhar
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: logs-falha-build
+          path: |
+            **/*.log
+            **/android/app/build/outputs/**/*
+          if-no-files-found: ignore
